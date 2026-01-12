@@ -642,8 +642,6 @@ func (c *Client) IsEvCharger(id int) (bool, error) {
 func (c *Client) execute(url, method string, params map[string]string, useJSON bool) []byte {
 	const maxAttempts = 3
 	backoff := 500 * time.Millisecond
-	ctx := context.Background()
-	debug := c.log != nil && c.log.Enabled(ctx, slog.LevelDebug)
 
 	for attempt := 1; attempt <= maxAttempts; attempt++ {
 		if c.credentials.token.Expiration < time.Now().Unix() {
@@ -652,38 +650,7 @@ func (c *Client) execute(url, method string, params map[string]string, useJSON b
 			}
 		}
 
-		req := c.httpClient.R().SetHeader("authtoken", c.credentials.token.ID)
-		switch method {
-		case "GET":
-			req.SetPathParams(params)
-		case "POST":
-			req.SetPathParams(params)
-			if useJSON {
-				req.SetBody(params)
-			} else {
-				req.SetFormData(params)
-			}
-		case "PUT":
-			req.SetPathParams(params)
-			req.SetBody(params)
-		}
-
-		if debug {
-			c.log.Debug("emporia api request", "method", method, "url", url, "params", params, "attempt", attempt)
-		}
-
-		resp, err := func() (*resty.Response, error) {
-			switch method {
-			case "GET":
-				return req.Get(url)
-			case "POST":
-				return req.Post(url)
-			case "PUT":
-				return req.Put(url)
-			default:
-				return nil, errors.New("unsupported method")
-			}
-		}()
+		resp, err := c.doRequest(url, method, params, useJSON)
 		if err != nil {
 			c.log.Error("request attempt failed", "attempt", attempt, "error", err)
 			time.Sleep(backoff)
@@ -691,37 +658,90 @@ func (c *Client) execute(url, method string, params map[string]string, useJSON b
 			continue
 		}
 
-		status := resp.StatusCode()
-		if debug {
-			body := resp.Bytes()
-			c.log.Debug("emporia api response", "status", status, "attempt", attempt, "body", string(body))
-		}
-		if status == http.StatusUnauthorized {
-			c.log.Debug("request unauthorized, attempting token refresh", "attempt", attempt)
-			if err := c.refreshToken(); err != nil {
-				return nil
-			}
+		result, shouldRetry := c.handleResponse(resp, attempt, maxAttempts)
+		if shouldRetry {
 			time.Sleep(backoff)
 			backoff *= 2
 			continue
 		}
 
-		if status == http.StatusBadRequest || status >= http.StatusInternalServerError {
-			c.log.Debug("request failed", "status", status, "attempt", attempt)
-			if attempt == maxAttempts {
-				break
-			}
-			time.Sleep(backoff)
-			backoff *= 2
-			continue
-		}
-
-		c.connected = true
-		return resp.Bytes()
+		return result
 	}
 
 	c.connected = false
 	return nil
+}
+
+// doRequest builds and executes an HTTP request.
+func (c *Client) doRequest(url, method string, params map[string]string, useJSON bool) (*resty.Response, error) {
+	req := c.httpClient.R().SetHeader("authtoken", c.credentials.token.ID)
+	c.prepareRequest(req, method, params, useJSON)
+
+	c.logRequest(method, url, params)
+
+	return c.executeMethod(req, method, url)
+}
+
+// prepareRequest configures the request based on HTTP method.
+func (c *Client) prepareRequest(req *resty.Request, method string, params map[string]string, useJSON bool) {
+	req.SetPathParams(params)
+	if method == "POST" {
+		if useJSON {
+			req.SetBody(params)
+		} else {
+			req.SetFormData(params)
+		}
+	} else if method == "PUT" {
+		req.SetBody(params)
+	}
+}
+
+// executeMethod performs the actual HTTP call.
+func (c *Client) executeMethod(req *resty.Request, method, url string) (*resty.Response, error) {
+	switch method {
+	case "GET":
+		return req.Get(url)
+	case "POST":
+		return req.Post(url)
+	case "PUT":
+		return req.Put(url)
+	default:
+		return nil, errors.New("unsupported method")
+	}
+}
+
+// logRequest logs request details if debug logging is enabled.
+func (c *Client) logRequest(method, url string, params map[string]string) {
+	if c.log != nil && c.log.Enabled(context.Background(), slog.LevelDebug) {
+		c.log.Debug("emporia api request", "method", method, "url", url, "params", params)
+	}
+}
+
+// handleResponse processes the response and determines if retry is needed.
+// Returns the response body (or nil) and whether to retry.
+func (c *Client) handleResponse(resp *resty.Response, attempt, maxAttempts int) ([]byte, bool) {
+	status := resp.StatusCode()
+
+	if c.log != nil && c.log.Enabled(context.Background(), slog.LevelDebug) {
+		c.log.Debug("emporia api response", "status", status, "attempt", attempt, "body", string(resp.Bytes()))
+	}
+
+	if status == http.StatusUnauthorized {
+		c.log.Debug("request unauthorized, attempting token refresh", "attempt", attempt)
+		if err := c.refreshToken(); err != nil {
+			c.connected = false
+			return nil, false
+		}
+		return nil, true
+	}
+
+	if status == http.StatusBadRequest || status >= http.StatusInternalServerError {
+		c.log.Debug("request failed", "status", status, "attempt", attempt)
+		return nil, attempt < maxAttempts
+	}
+
+	c.connected = true
+	return resp.Bytes(), false
 }
 
 // getDeviceIDList returns a slice of all known device GIDs.
