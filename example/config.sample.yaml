@@ -1,0 +1,37 @@
+---
+# Emporia Vue API Configuration
+# Copy this file to config.yaml and update with your credentials
+
+emporia:
+  credentials:
+    # Your Emporia account email
+    username: your-email@example.com
+    # Your Emporia account password
+    password: your-password
+
+  # AWS Cognito settings (optional - defaults are provided)
+  # cognito:
+  #   client_id: "4qte47jbstod8apnfic0bunmrq"
+  #   region: "us-east-2"
+  #   user_pool: "us-east-2_ghlOXVLi1"
+
+  # Auto-reconnect on connection failure
+  auto_reconnect: true
+
+  # Polling intervals for usage data
+  # Options: minute, hour, day, month
+  scope_of_interest:
+    - minute
+    - day
+
+# Timezone for time-based operations
+timezone: America/New_York
+
+# Logging configuration
+logging:
+  # Log level: DEBUG, INFO, WARN, ERROR
+  level: INFO
+  # Output format: TEXT or JSON
+  output: TEXT
+  # Include source file location in logs
+  source: false
