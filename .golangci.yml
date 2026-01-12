@@ -42,9 +42,6 @@ linters:
       disabled-checks:
         - hugeParam # triggers on large structs passed by value
 
-    goimports:
-      local-prefixes: github.com/alex-savin/go-emporia-vue
-
     misspell:
       locale: US
 
@@ -55,7 +52,3 @@ linters:
         linters:
           - errcheck
           - unparam
-
-output:
-  max-issues-per-linter: 50
-  max-same-issues: 10
