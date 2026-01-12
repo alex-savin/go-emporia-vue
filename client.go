@@ -380,7 +380,7 @@ func (c *Client) GetVehicles() []*VueVehicle {
 	}
 
 	var vehicles []*VueVehicle
-	err := json.Unmarshal([]byte(resp), &vehicles)
+	err := json.Unmarshal(resp, &vehicles)
 	if err != nil {
 		c.log.Error("cannot unmarshal json", "func", "GetVehicles", "error", err)
 	}
@@ -530,7 +530,7 @@ func (c *Client) GetChartUsage(d *VueDevice, channel string, start, end time.Tim
 	}
 
 	var chart ChannelChart
-	err := json.Unmarshal([]byte(resp), &chart)
+	err := json.Unmarshal(resp, &chart)
 	if err != nil {
 		c.log.Error("cannot unmarshal json", "func", "GetChartUsage", "error", err)
 	}
@@ -552,7 +552,7 @@ func (c *Client) GetDeviceProperties(id int) *Properties {
 	}
 
 	var properties Properties
-	err := json.Unmarshal([]byte(resp), &properties)
+	err := json.Unmarshal(resp, &properties)
 	if err != nil {
 		c.log.Error("cannot unmarshal json", "func", "GetDeviceProperty", "error", err)
 	}
@@ -639,7 +639,7 @@ func (c *Client) IsEvCharger(id int) (bool, error) {
 }
 
 // execute performs an HTTP request against the Emporia API with retry logic and token refresh.
-func (c *Client) execute(url string, method string, params map[string]string, useJSON bool) []byte {
+func (c *Client) execute(url, method string, params map[string]string, useJSON bool) []byte {
 	const maxAttempts = 3
 	backoff := 500 * time.Millisecond
 	ctx := context.Background()
