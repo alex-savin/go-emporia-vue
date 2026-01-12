@@ -685,13 +685,14 @@ func (c *Client) doRequest(url, method string, params map[string]string, useJSON
 // prepareRequest configures the request based on HTTP method.
 func (c *Client) prepareRequest(req *resty.Request, method string, params map[string]string, useJSON bool) {
 	req.SetPathParams(params)
-	if method == "POST" {
+	switch method {
+	case "POST":
 		if useJSON {
 			req.SetBody(params)
 		} else {
 			req.SetFormData(params)
 		}
-	} else if method == "PUT" {
+	case "PUT":
 		req.SetBody(params)
 	}
 }
