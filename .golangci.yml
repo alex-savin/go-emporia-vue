@@ -17,8 +17,6 @@ linters:
     - unused
     - gosimple
     - gocritic
-    - gofmt
-    - goimports
     - misspell
     - unconvert
     - unparam
@@ -52,3 +50,8 @@ linters:
         linters:
           - errcheck
           - unparam
+
+formatters:
+  enable:
+    - gofmt
+    - goimports
