@@ -23,21 +23,26 @@ import (
 )
 
 func main() {
+	if err := run(); err != nil {
+		slog.Error("application error", "error", err)
+		os.Exit(1)
+	}
+}
+
+func run() error {
 	ctx, cancel := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer cancel()
 
 	// Load configuration from config.yaml
 	cfg, err := config.Load()
 	if err != nil {
-		slog.Error("failed to load config", "error", err)
-		os.Exit(1)
+		return fmt.Errorf("failed to load config: %w", err)
 	}
 
 	// Create the Emporia Vue client (uses logger from config)
 	client, err := vue.NewClient(nil, cfg)
 	if err != nil {
-		cfg.Logger.Error("failed to create client", "error", err)
-		os.Exit(1)
+		return fmt.Errorf("failed to create client: %w", err)
 	}
 
 	logger := cfg.Logger
@@ -49,12 +54,14 @@ func main() {
 	printDevices(client, logger)
 
 	// Display current energy usage
-	printCurrentUsage(client, logger)
+	printCurrentUsage(client)
 
 	// Start scheduled polling if configured
 	if len(cfg.Emporia.ScopeOfInterest) > 0 {
 		runScheduler(ctx, client, cfg, logger)
 	}
+
+	return nil
 }
 
 // printCustomerInfo displays the authenticated customer's information.
@@ -136,7 +143,7 @@ func printDevices(client *vue.Client, logger *slog.Logger) {
 }
 
 // printCurrentUsage displays current energy usage for all devices.
-func printCurrentUsage(client *vue.Client, logger *slog.Logger) {
+func printCurrentUsage(client *vue.Client) {
 	devices := client.GetDevices()
 	if len(devices) == 0 {
 		return

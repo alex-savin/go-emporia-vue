@@ -28,6 +28,7 @@ const (
 )
 
 // Conf loads configuration from standard locations.
+//
 // Deprecated: Use config.Load() instead.
 func Conf() (*Config, error) {
 	return config.Load()

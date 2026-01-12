@@ -206,11 +206,11 @@ type ConnectionStatus struct {
 // Schedule defines an on/off schedule for an outlet or charger.
 type Schedule struct {
 	ScheduleGid      int      // "scheduleGid": 30303,
-	LoadGid          int      //"loadGid": 50505,
+	LoadGid          int      // "loadGid": 50505,
 	DeviceOn         bool     // "deviceOn": true,
 	Enabled          bool     // "enabled": true,
-	Anchor           string   //"anchor": "MIDNIGHT",
-	OffsetFromAnchor string   //"offsetFromAnchor": "06:00:00",
+	Anchor           string   // "anchor": "MIDNIGHT",
+	OffsetFromAnchor string   // "offsetFromAnchor": "06:00:00",
 	DaysOfWeek       []string // "daysOfWeek": [ "MONDAY", "TUESDAY", "WEDNESDAY", "THURSDAY", "FRIDAY", "SATURDAY", "SUNDAY"],
 	DeviceGid        int      // Device GID (may be null for load-level schedules)
 }

@@ -49,6 +49,7 @@ linters:
         linters:
           - errcheck
           - unparam
+          - govet
 
 formatters:
   enable:

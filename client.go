@@ -60,27 +60,27 @@ type Client struct {
 
 // NewClient creates a new Emporia Vue API client.
 // If logger is nil, the logger from config will be used.
-func NewClient(logger *slog.Logger, config *Config) (*Client, error) {
-	if config == nil {
+func NewClient(logger *slog.Logger, cfg *Config) (*Client, error) {
+	if cfg == nil {
 		return nil, errors.New("config must not be nil")
 	}
-	if config.Emporia.Credentials.Username == "" || config.Emporia.Credentials.Password == "" {
+	if cfg.Emporia.Credentials.Username == "" || cfg.Emporia.Credentials.Password == "" {
 		return nil, errors.New("emporia credentials are required")
 	}
 
 	// Use config logger if none provided
 	if logger == nil {
-		logger = config.Logger
+		logger = cfg.Logger
 	}
 
 	credentials := &credentials{
-		username: config.Emporia.Credentials.Username,
-		password: config.Emporia.Credentials.Password,
+		username: cfg.Emporia.Credentials.Username,
+		password: cfg.Emporia.Credentials.Password,
 		token:    &token{},
 		cognito: cognito{
-			clientID: config.Emporia.Cognito.ClientID,
-			region:   config.Emporia.Cognito.Region,
-			userPool: config.Emporia.Cognito.UserPool,
+			clientID: cfg.Emporia.Cognito.ClientID,
+			region:   cfg.Emporia.Cognito.Region,
+			userPool: cfg.Emporia.Cognito.UserPool,
 		},
 	}
 	client := &Client{
@@ -213,7 +213,7 @@ func (c *Client) persistToken() error {
 		return err
 	}
 
-	if err := os.WriteFile(credentialsFile, token, 0600); err != nil {
+	if err := os.WriteFile(credentialsFile, token, 0o600); err != nil {
 		c.log.Error("cannot write credentials file", "error", err)
 		return err
 	}
@@ -322,7 +322,7 @@ func (c *Client) GetEvChargers() []*EvCharger {
 	}
 
 	var chargers []*EvCharger
-	err := json.Unmarshal([]byte(resp), &chargers)
+	err := json.Unmarshal(resp, &chargers)
 	if err != nil {
 		c.log.Error("cannot unmarshal json", "func", "GetEvChargers", "error", err)
 	}
@@ -341,7 +341,7 @@ func (c *Client) GetBatteries() []*Battery {
 	}
 
 	var batteries []*Battery
-	err := json.Unmarshal([]byte(resp), &batteries)
+	err := json.Unmarshal(resp, &batteries)
 	if err != nil {
 		c.log.Error("cannot unmarshal json", "func", "GetBatteries", "error", err)
 	}
@@ -361,7 +361,7 @@ func (c *Client) GetThermostats() []*Thermostat {
 	}
 
 	var thermostats []*Thermostat
-	err := json.Unmarshal([]byte(resp), &thermostats)
+	err := json.Unmarshal(resp, &thermostats)
 	if err != nil {
 		c.log.Error("cannot unmarshal json", "func", "GetThermostats", "error", err)
 	}
@@ -452,13 +452,13 @@ func (c *Client) GetRemoteConfig(appVersion string) map[string]interface{} {
 		return nil
 	}
 
-	config := make(map[string]interface{})
-	if err := json.Unmarshal(resp, &config); err != nil {
+	remoteConfig := make(map[string]interface{})
+	if err := json.Unmarshal(resp, &remoteConfig); err != nil {
 		c.log.Error("cannot unmarshal remote config", "error", err)
 		return nil
 	}
 
-	return config
+	return remoteConfig
 }
 
 // GetDeviceUsage retrieves energy usage for a single device at the specified time scale.
@@ -512,7 +512,7 @@ func (c *Client) GetDevicesUsage(scope string) DeviceListUsages {
 }
 
 // GetChartUsage retrieves historical usage data for charting a specific channel.
-func (c *Client) GetChartUsage(d *VueDevice, channel string, start time.Time, end time.Time) ChannelChart {
+func (c *Client) GetChartUsage(d *VueDevice, channel string, start, end time.Time) ChannelChart {
 	defer c.timeTrack("GetChartUsage")()
 
 	params := map[string]string{
@@ -639,7 +639,7 @@ func (c *Client) IsEvCharger(id int) (bool, error) {
 }
 
 // execute performs an HTTP request against the Emporia API with retry logic and token refresh.
-func (c *Client) execute(url string, method string, params map[string]string, json bool) []byte {
+func (c *Client) execute(url string, method string, params map[string]string, useJSON bool) []byte {
 	const maxAttempts = 3
 	backoff := 500 * time.Millisecond
 	ctx := context.Background()
@@ -658,7 +658,7 @@ func (c *Client) execute(url string, method string, params map[string]string, js
 			req.SetPathParams(params)
 		case "POST":
 			req.SetPathParams(params)
-			if json {
+			if useJSON {
 				req.SetBody(params)
 			} else {
 				req.SetFormData(params)
