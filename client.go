@@ -303,7 +303,7 @@ func (c *Client) GetOutlets() []*Outlet {
 	}
 
 	var outlets []*Outlet
-	err := json.Unmarshal([]byte(resp), &outlets)
+	err := json.Unmarshal(resp, &outlets)
 	if err != nil {
 		c.log.Error("cannot unmarshal json", "func", "GetOutlets", "error", err)
 	}
