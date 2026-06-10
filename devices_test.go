@@ -69,19 +69,45 @@ func TestVueDeviceIsEnergyMeter(t *testing.T) {
 		name      string
 		outlet    *Outlet
 		evCharger *EvCharger
+		battery   *Battery
 		expected  bool
 	}{
-		{"Neither outlet nor charger", nil, nil, true},
-		{"With outlet", &Outlet{}, nil, false},
-		{"With charger", nil, &EvCharger{}, false},
-		{"With both", &Outlet{}, &EvCharger{}, false},
+		{"Neither outlet nor charger", nil, nil, nil, true},
+		{"With outlet", &Outlet{}, nil, nil, false},
+		{"With charger", nil, &EvCharger{}, nil, false},
+		{"With both", &Outlet{}, &EvCharger{}, nil, false},
+		{"With battery", nil, nil, &Battery{}, false},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			device := &VueDevice{Outlet: tt.outlet, EvCharger: tt.evCharger}
+			device := &VueDevice{Outlet: tt.outlet, EvCharger: tt.evCharger, Battery: tt.battery}
 			if device.IsEnergyMeter() != tt.expected {
 				t.Fatalf("expected IsEnergyMeter=%v", tt.expected)
+			}
+		})
+	}
+}
+
+func TestVueDeviceChargerRates(t *testing.T) {
+	tests := []struct {
+		name        string
+		charger     *EvCharger
+		wantRate    int
+		wantMaxRate int
+	}{
+		{"configured", &EvCharger{ChargingRate: 16, MaxChargingRate: 48}, 16, 48},
+		{"unset uses defaults", &EvCharger{}, defaultChargingRate, defaultMaxChargingRate},
+		{"zero uses defaults", &EvCharger{ChargingRate: 0, MaxChargingRate: 0}, defaultChargingRate, defaultMaxChargingRate},
+		{"nil charger uses defaults", nil, defaultChargingRate, defaultMaxChargingRate},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			device := &VueDevice{EvCharger: tt.charger}
+			rate, maxRate := device.chargerRates()
+			if rate != tt.wantRate || maxRate != tt.wantMaxRate {
+				t.Fatalf("chargerRates() = (%d,%d), want (%d,%d)", rate, maxRate, tt.wantRate, tt.wantMaxRate)
 			}
 		})
 	}

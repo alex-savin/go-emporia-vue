@@ -33,73 +33,72 @@ type Info struct {
 	Firmware     string
 }
 
-// On turns on the device. For outlets, this enables power output.
-// For EV chargers, this starts charging at the configured rate.
-func (d *VueDevice) On() {
-	defer d.vue.timeTrack("[TIMETRK] Executing GetDeviceUsage Request")()
+// Default EV charger rates (amps) used when the device has none configured.
+const (
+	defaultChargingRate    = 32
+	defaultMaxChargingRate = 40
+)
 
-	var resp []byte
-	if d.IsOutlet() {
-		params := map[string]string{
-			"deviceGid": strconv.Itoa(d.DeviceGid),
-			"outletOn":  "true",
+// chargerRates returns the charging and max charging rates to send for this
+// device, using its configured values and falling back to the defaults when
+// they are unset.
+func (d *VueDevice) chargerRates() (rate, maxRate int) {
+	rate = defaultChargingRate
+	maxRate = defaultMaxChargingRate
+	if d.EvCharger != nil {
+		if d.EvCharger.ChargingRate > 0 {
+			rate = d.EvCharger.ChargingRate
 		}
-		resp = d.vue.execute(apiURLs["API_OUTLET"], "PUT", params, true)
-	}
-	if d.IsEvCharger() {
-		params := map[string]string{
-			"deviceGid":               strconv.Itoa(d.DeviceGid),
-			"chargerOn":               "true",
-			"chargingRate":            "32",
-			"maxChargingRate":         "40",
-			"offPeakSchedulesEnabled": "false",
-		}
-		resp = d.vue.execute(apiURLs["API_CHARGER"], "PUT", params, true)
-	}
-	if resp == nil {
-		d.vue.log.Error("toggle on request failed", "device", d.DeviceGid)
-		return
-	}
-
-	switch {
-	case d.IsOutlet():
-		var outlet Outlet
-		if err := json.Unmarshal(resp, &outlet); err != nil {
-			d.vue.log.Error("cannot parse outlet toggle response", "error", err)
-		}
-	case d.IsEvCharger():
-		var charger EvCharger
-		if err := json.Unmarshal(resp, &charger); err != nil {
-			d.vue.log.Error("cannot parse charger toggle response", "error", err)
+		if d.EvCharger.MaxChargingRate > 0 {
+			maxRate = d.EvCharger.MaxChargingRate
 		}
 	}
+	return rate, maxRate
 }
 
-// Off turns off the device. For outlets, this disables power output.
-// For EV chargers, this stops charging.
+// On turns on the device. For outlets, this enables power output. For EV
+// chargers, this starts charging at the device's configured rate (falling back
+// to the defaults when unset).
+func (d *VueDevice) On() {
+	d.setState(true)
+}
+
+// Off turns off the device. For outlets, this disables power output. For EV
+// chargers, this stops charging.
 func (d *VueDevice) Off() {
-	defer d.vue.timeTrack("[TIMETRK] Executing GetDeviceUsage Request")()
+	d.setState(false)
+}
+
+// setState toggles an outlet or EV charger on/off and applies the API's
+// returned state back onto the device.
+func (d *VueDevice) setState(on bool) {
+	defer d.vue.timeTrack("SetDeviceState")()
 
 	var resp []byte
-	if d.IsOutlet() {
+	switch {
+	case d.IsOutlet():
 		params := map[string]string{
 			"deviceGid": strconv.Itoa(d.DeviceGid),
-			"outletOn":  "false",
+			"outletOn":  strconv.FormatBool(on),
 		}
 		resp = d.vue.execute(apiURLs["API_OUTLET"], "PUT", params, true)
-	}
-	if d.IsEvCharger() {
+	case d.IsEvCharger():
+		chargingRate, maxChargingRate := d.chargerRates()
 		params := map[string]string{
 			"deviceGid":               strconv.Itoa(d.DeviceGid),
-			"chargerOn":               "false",
-			"chargingRate":            "32",
-			"maxChargingRate":         "40",
+			"chargerOn":               strconv.FormatBool(on),
+			"chargingRate":            strconv.Itoa(chargingRate),
+			"maxChargingRate":         strconv.Itoa(maxChargingRate),
 			"offPeakSchedulesEnabled": "false",
 		}
 		resp = d.vue.execute(apiURLs["API_CHARGER"], "PUT", params, true)
+	default:
+		d.vue.log.Error("device is neither an outlet nor an EV charger", "device", d.DeviceGid)
+		return
 	}
+
 	if resp == nil {
-		d.vue.log.Error("toggle off request failed", "device", d.DeviceGid)
+		d.vue.log.Error("toggle request failed", "device", d.DeviceGid, "on", on)
 		return
 	}
 
@@ -108,12 +107,16 @@ func (d *VueDevice) Off() {
 		var outlet Outlet
 		if err := json.Unmarshal(resp, &outlet); err != nil {
 			d.vue.log.Error("cannot parse outlet toggle response", "error", err)
+			return
 		}
+		d.Outlet = &outlet
 	case d.IsEvCharger():
 		var charger EvCharger
 		if err := json.Unmarshal(resp, &charger); err != nil {
 			d.vue.log.Error("cannot parse charger toggle response", "error", err)
+			return
 		}
+		d.EvCharger = &charger
 	}
 }
 
@@ -264,12 +267,10 @@ type Outlet struct {
 	Schedules        *[]Schedule `json:"schedules,omitempty"`
 }
 
-// IsEnergyMeter returns true if this device is a Vue energy monitor (not an outlet or charger).
+// IsEnergyMeter returns true if this device is a Vue energy monitor (not an
+// outlet, EV charger, or battery).
 func (v *VueDevice) IsEnergyMeter() bool {
-	if isNil(v.Outlet) && isNil(v.EvCharger) {
-		return true
-	}
-	return false
+	return isNil(v.Outlet) && isNil(v.EvCharger) && isNil(v.Battery)
 }
 
 // IsOutlet returns true if this device is an Emporia smart outlet.

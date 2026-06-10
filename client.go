@@ -10,6 +10,7 @@ import (
 	"os"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/aws/aws-sdk-go-v2/aws"
@@ -41,21 +42,44 @@ type cognito struct {
 	userPool string
 }
 
-var credentialsFile = func() string {
+// credentialsFilePath resolves the token cache location lazily, on each use,
+// so that callers which set EMPORIA_CREDENTIALS_FILE at runtime (e.g. from
+// main()) are honored. Resolving it in a package-level var initializer would
+// capture the value at program init, before such callers run.
+func credentialsFilePath() string {
 	if v := os.Getenv("EMPORIA_CREDENTIALS_FILE"); v != "" {
 		return v
 	}
 	return "./.credentials.yaml"
-}()
+}
 
-// Client is a struct
+// Client is a concurrency-safe Emporia Vue API client. Its read methods may be
+// called from multiple goroutines simultaneously.
 type Client struct {
+	mu          sync.RWMutex // guards devices, vehicles, connected
 	devices     map[int]*VueDevice
 	vehicles    []*VueVehicle
+	connected   bool
+	tokenMu     sync.Mutex // serializes token read/refresh/persist
 	credentials *credentials
 	httpClient  *resty.Client
-	connected   bool
+	ctx         context.Context
 	log         *slog.Logger
+}
+
+// context returns the base context for outbound calls (defaults to Background).
+func (c *Client) context() context.Context {
+	if c.ctx != nil {
+		return c.ctx
+	}
+	return context.Background()
+}
+
+// SetContext sets the base context used for outbound API calls, allowing
+// callers to cancel in-flight requests (e.g. on shutdown). Call it before
+// issuing concurrent requests.
+func (c *Client) SetContext(ctx context.Context) {
+	c.ctx = ctx
 }
 
 // NewClient creates a new Emporia Vue API client.
@@ -85,11 +109,13 @@ func NewClient(logger *slog.Logger, cfg *Config) (*Client, error) {
 	}
 	client := &Client{
 		credentials: credentials,
+		ctx:         context.Background(),
 		log:         logger,
 	}
 
-	if _, err := os.Stat(credentialsFile); err == nil {
-		t, err := os.ReadFile(credentialsFile)
+	credFile := credentialsFilePath()
+	if _, err := os.Stat(credFile); err == nil {
+		t, err := os.ReadFile(credFile)
 		if err != nil {
 			client.log.Error("cannot read .credentials.yaml", "error", err)
 		}
@@ -100,31 +126,26 @@ func NewClient(logger *slog.Logger, cfg *Config) (*Client, error) {
 		}
 	}
 
+	// Bootstrap runs single-threaded before the client is shared, so the
+	// *Locked workers are called directly.
 	if client.credentials.token.Expiration == 0 && client.credentials.token.Access == "" && client.credentials.token.Refresh == "" && client.credentials.token.ID == "" {
-		if err := client.auth(); err != nil {
+		if err := client.authLocked(); err != nil {
 			return nil, err
 		}
 	}
 
 	if client.credentials.token.Expiration < time.Now().Unix() {
-		if err := client.refreshToken(); err != nil {
+		if err := client.refreshTokenLocked(); err != nil {
 			return nil, err
 		}
 	}
 
+	// Retry/backoff and token-refresh-on-401 are handled by execute(); the
+	// resty client is intentionally left without its own retry layer to avoid
+	// compounding attempts (and to avoid retrying non-retryable 4xx responses).
 	httpClient := resty.New()
 	httpClient.SetBaseURL(apiURLs["API_ROOT"]).
-		SetHeader("authtoken", client.credentials.token.ID).
-		SetRetryCount(3).
-		SetRetryWaitTime(2*time.Second).
-		AddRetryConditions(
-			func(r *resty.Response, err error) bool {
-				return r.StatusCode() == http.StatusInternalServerError
-			},
-			func(r *resty.Response, err error) bool {
-				return r.StatusCode() == http.StatusBadRequest
-			},
-		)
+		SetHeader("authtoken", client.credentials.token.ID)
 
 	client.httpClient = httpClient
 	client.GetDevices()
@@ -132,11 +153,13 @@ func NewClient(logger *slog.Logger, cfg *Config) (*Client, error) {
 	return client, nil
 }
 
-// auth performs Cognito user/password authentication and stores the token locally.
-func (c *Client) auth() error {
+// authLocked performs Cognito user/password authentication and stores the
+// token locally. The caller must hold tokenMu (or guarantee single-threaded
+// use, as in NewClient).
+func (c *Client) authLocked() error {
 	defer c.timeTrack("Authentication")()
 
-	ctx := context.Background()
+	ctx := c.context()
 	cfg, err := config.LoadDefaultConfig(ctx, config.WithRegion(c.credentials.cognito.region))
 	if err != nil {
 		c.log.Error("cannot load AWS config", "error", err)
@@ -170,11 +193,12 @@ func (c *Client) auth() error {
 	return nil
 }
 
-// refreshToken refreshes the access token using the stored refresh token.
-func (c *Client) refreshToken() error {
+// refreshTokenLocked refreshes the access token using the stored refresh token.
+// The caller must hold tokenMu.
+func (c *Client) refreshTokenLocked() error {
 	defer c.timeTrack("RefreshToken")()
 
-	ctx := context.Background()
+	ctx := c.context()
 	cfg, err := config.LoadDefaultConfig(ctx, config.WithRegion(c.credentials.cognito.region))
 	if err != nil {
 		c.log.Error("cannot load AWS config", "error", err)
@@ -206,6 +230,32 @@ func (c *Client) refreshToken() error {
 	return nil
 }
 
+// ensureValidToken refreshes the token if it has expired. Concurrent callers
+// serialize on tokenMu and the double-check ensures only one refresh happens.
+func (c *Client) ensureValidToken() error {
+	c.tokenMu.Lock()
+	defer c.tokenMu.Unlock()
+	if c.credentials.token.Expiration < time.Now().Unix() {
+		return c.refreshTokenLocked()
+	}
+	return nil
+}
+
+// refreshToken refreshes the token, serializing against other token operations.
+func (c *Client) refreshToken() error {
+	c.tokenMu.Lock()
+	defer c.tokenMu.Unlock()
+	return c.refreshTokenLocked()
+}
+
+// tokenID returns the current ID token under tokenMu.
+func (c *Client) tokenID() string {
+	c.tokenMu.Lock()
+	defer c.tokenMu.Unlock()
+	return c.credentials.token.ID
+}
+
+// persistToken writes the current token to disk. The caller must hold tokenMu.
 func (c *Client) persistToken() error {
 	token, err := yaml.Marshal(c.credentials.token)
 	if err != nil {
@@ -213,7 +263,7 @@ func (c *Client) persistToken() error {
 		return err
 	}
 
-	if err := os.WriteFile(credentialsFile, token, 0o600); err != nil {
+	if err := os.WriteFile(credentialsFilePath(), token, 0o600); err != nil {
 		c.log.Error("cannot write credentials file", "error", err)
 		return err
 	}
@@ -270,7 +320,9 @@ func (c *Client) GetDevices() []*VueDevice {
 		devices[device.DeviceGid] = device
 	}
 
+	c.mu.Lock()
 	c.devices = devices
+	c.mu.Unlock()
 
 	return customer.Devices
 }
@@ -279,17 +331,32 @@ func (c *Client) GetDevices() []*VueDevice {
 func (c *Client) GetEnergyMonitors() []*VueDevice {
 	defer c.timeTrack("GetEnergyMonitors")()
 
-	var monitors []*VueDevice
-	if c.devices == nil {
+	c.mu.RLock()
+	empty := c.devices == nil
+	c.mu.RUnlock()
+	if empty {
 		c.GetDevices()
 	}
-	for _, d := range c.devices {
+
+	var monitors []*VueDevice
+	for _, d := range c.snapshotDevices() {
 		if !d.IsOutlet() && !d.IsEvCharger() && !d.IsBattery() {
 			monitors = append(monitors, d)
 		}
 	}
 
 	return monitors
+}
+
+// snapshotDevices returns a copy of the current device slice under the read lock.
+func (c *Client) snapshotDevices() []*VueDevice {
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+	out := make([]*VueDevice, 0, len(c.devices))
+	for _, d := range c.devices {
+		out = append(out, d)
+	}
+	return out
 }
 
 // GetOutlets retrieves all Emporia smart outlets for the customer.
@@ -385,7 +452,9 @@ func (c *Client) GetVehicles() []*VueVehicle {
 		c.log.Error("cannot unmarshal json", "func", "GetVehicles", "error", err)
 	}
 
+	c.mu.Lock()
 	c.vehicles = vehicles
+	c.mu.Unlock()
 
 	return vehicles
 }
@@ -602,38 +671,40 @@ func (c *Client) UpdateChannel(ch *Channel) error {
 
 // IsConnected returns true if the client has an active connection to the API.
 func (c *Client) IsConnected() bool {
+	c.mu.RLock()
+	defer c.mu.RUnlock()
 	return c.connected
 }
 
-// IsEnergyMeter checks if the device with the given ID is a Vue energy monitor.
+// device returns the device with the given ID under the read lock.
+func (c *Client) device(id int) (*VueDevice, bool) {
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+	d, ok := c.devices[id]
+	return d, ok
+}
+
+// IsEnergyMeter checks if the device with the given ID is a Vue energy monitor
+// (not an outlet, EV charger, or battery).
 func (c *Client) IsEnergyMeter(id int) (bool, error) {
-	if d, ok := c.devices[id]; ok {
-		if isNil(d.Outlet) && isNil(d.EvCharger) {
-			return true, nil
-		}
-		return false, nil
+	if d, ok := c.device(id); ok {
+		return isNil(d.Outlet) && isNil(d.EvCharger) && isNil(d.Battery), nil
 	}
 	return false, errors.New("device not found")
 }
 
 // IsOutlet checks if the device with the given ID is a smart outlet.
 func (c *Client) IsOutlet(id int) (bool, error) {
-	if d, ok := c.devices[id]; ok {
-		if !isNil(d.Outlet) {
-			return true, nil
-		}
-		return false, nil
+	if d, ok := c.device(id); ok {
+		return !isNil(d.Outlet), nil
 	}
 	return false, errors.New("device not found")
 }
 
 // IsEvCharger checks if the device with the given ID is an EV charger.
 func (c *Client) IsEvCharger(id int) (bool, error) {
-	if d, ok := c.devices[id]; ok {
-		if !isNil(d.EvCharger) {
-			return true, nil
-		}
-		return false, nil
+	if d, ok := c.device(id); ok {
+		return !isNil(d.EvCharger), nil
 	}
 	return false, errors.New("device not found")
 }
@@ -644,10 +715,8 @@ func (c *Client) execute(url, method string, params map[string]string, useJSON b
 	backoff := 500 * time.Millisecond
 
 	for attempt := 1; attempt <= maxAttempts; attempt++ {
-		if c.credentials.token.Expiration < time.Now().Unix() {
-			if err := c.refreshToken(); err != nil {
-				return nil
-			}
+		if err := c.ensureValidToken(); err != nil {
+			return nil
 		}
 
 		resp, err := c.doRequest(url, method, params, useJSON)
@@ -668,13 +737,15 @@ func (c *Client) execute(url, method string, params map[string]string, useJSON b
 		return result
 	}
 
-	c.connected = false
+	c.setConnected(false)
 	return nil
 }
 
 // doRequest builds and executes an HTTP request.
 func (c *Client) doRequest(url, method string, params map[string]string, useJSON bool) (*resty.Response, error) {
-	req := c.httpClient.R().SetHeader("authtoken", c.credentials.token.ID)
+	req := c.httpClient.R().
+		SetContext(c.context()).
+		SetHeader("authtoken", c.tokenID())
 	c.prepareRequest(req, method, params, useJSON)
 
 	c.logRequest(method, url, params)
@@ -730,23 +801,39 @@ func (c *Client) handleResponse(resp *resty.Response, attempt, maxAttempts int) 
 	if status == http.StatusUnauthorized {
 		c.log.Debug("request unauthorized, attempting token refresh", "attempt", attempt)
 		if err := c.refreshToken(); err != nil {
-			c.connected = false
+			c.setConnected(false)
 			return nil, false
 		}
 		return nil, true
 	}
 
-	if status == http.StatusBadRequest || status >= http.StatusInternalServerError {
-		c.log.Debug("request failed", "status", status, "attempt", attempt)
+	// Retry only transient failures (5xx and 429). Other 4xx responses are
+	// client errors that won't succeed on retry, so return immediately.
+	if status == http.StatusTooManyRequests || status >= http.StatusInternalServerError {
+		c.log.Debug("request failed (retryable)", "status", status, "attempt", attempt)
 		return nil, attempt < maxAttempts
 	}
 
-	c.connected = true
+	if status >= http.StatusBadRequest {
+		c.log.Debug("request failed (non-retryable)", "status", status, "attempt", attempt)
+		return nil, false
+	}
+
+	c.setConnected(true)
 	return resp.Bytes(), false
+}
+
+// setConnected updates the connection state under the client lock.
+func (c *Client) setConnected(v bool) {
+	c.mu.Lock()
+	c.connected = v
+	c.mu.Unlock()
 }
 
 // getDeviceIDList returns a slice of all known device GIDs.
 func (c *Client) getDeviceIDList() []int {
+	c.mu.RLock()
+	defer c.mu.RUnlock()
 	var ids []int
 	for _, device := range c.devices {
 		ids = append(ids, device.DeviceGid)
